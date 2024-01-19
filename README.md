@@ -53,6 +53,7 @@ To use the Onboard Automator, follow these steps:
 
    - [deploy_resources.yml](.github/workflows/deploy_resources.yml):
 
+     - branch
      - RESOURCE_GROUP_NAME
      - FUNCTION_APP_NAME
      - FUNCTION_APP_SLOT
