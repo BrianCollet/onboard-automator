@@ -94,3 +94,9 @@ EMPLOYEE_ID,FIRST_NAME,LAST_NAME,EMAIL,PHONE_NUMBER,HIRE_DATE,JOB_TITLE,DEPARTME
 
 - [@madebygps](https://github.com/madebygps)
 - [Original repository](https://github.com/madebygps/projects)
+
+## Future Additions
+
+- Bicep deployment
+- Terraform deployment
+- Assign RBAC roles to users
