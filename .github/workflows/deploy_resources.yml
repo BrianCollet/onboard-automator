@@ -1,0 +1,130 @@
+name: Build and deploy Python code to Azure Function App
+
+on:
+  push:
+    branches:
+      - prod
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP_NAME: "{UPDATE-ME}"
+  FUNCTION_APP_NAME: "{UPDATE-ME}"
+  FUNCTION_APP_SLOT: "{UPDATE-ME}" # default = Production
+  AZURE_FUNCTION_APP_PACKAGE_PATH: "." # set this to the path to your web app project, defaults to the repository root
+  PYTHON_VERSION: "3.11" # set this to the python version to use (supports 3.6, 3.7, 3.8)
+
+jobs:
+  deploy_function_app_resources:
+    name: Deploy Function App resources
+    runs-on: ubuntu-latest
+    steps:
+      - name: Authenticate to Azure
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy Function App ARM Template
+        uses: azure/arm-deploy@v1
+        with:
+          resourceGroupName: ${{ env.RESOURCE_GROUP_NAME }}
+          template: functionAppArmTemplate.json
+          parameters: functionAppArmParameters.json
+
+  build_function_app_code:
+    name: Build Function App Code
+    runs-on: ubuntu-latest
+    needs: deploy_function_app_resources
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python version
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Create and start virtual environment
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r api/requirements.txt
+
+      - name: Zip artifact for deployment
+        run: zip -r -j release.zip api/*
+
+      - name: Upload artifact for deployment job
+        uses: actions/upload-artifact@v3
+        with:
+          name: python-app
+          path: |
+            release.zip
+            !venv/
+          if-no-files-found: error
+
+  deploy_function_app_code:
+    name: Deploy Function App Code
+    runs-on: ubuntu-latest
+    needs: build_function_app_code
+    steps:
+      - name: Authenticate to Azure
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v3
+        with:
+          name: python-app
+
+      - name: Unzip artifact for deployment
+        run: |
+          unzip release.zip
+          ls -a
+
+      - name: Deploy to Azure Functions
+        uses: Azure/functions-action@v1
+        id: deploy-to-function
+        with:
+          app-name: "${{ env.FUNCTION_APP_NAME }}"
+          slot-name: "${{ env.FUNCTION_APP_SLOT }}"
+          package: ${{ env.AZURE_FUNCTION_APP_PACKAGE_PATH }}
+          scm-do-build-during-deployment: true
+          enable-oryx-build: true
+
+  deploy_logic_app:
+    name: Deploy Logic App
+    runs-on: ubuntu-latest
+    needs: deploy_function_app_code
+    steps:
+      - name: Authenticate to Azure
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy Logic App ARM Template
+        uses: azure/arm-deploy@v1
+        with:
+          subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          resourceGroupName: ${{ env.RESOURCE_GROUP_NAME }}
+          template: logicAppArmTemplate.json
+          parameters: logicAppArmParameters.json

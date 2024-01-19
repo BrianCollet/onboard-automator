@@ -1,0 +1,669 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "function_app_name": {
+            "type": "string"
+        },
+        "logic_app_name": {
+            "type": "string"
+        },
+        "csv_files_storage_account_name": {
+            "type": "string"
+        },
+        "pending_container_name": {
+            "type": "string",
+            "defaultValue": "pending"
+        },
+        "completed_container_name": {
+            "type": "string",
+            "defaultValue": "completed"
+        },
+        "office365_connection": {
+            "type": "string",
+            "defaultValue": "office365"
+        },
+        "azuread_connection": {
+            "type": "string",
+            "defaultValue": "azuread"
+        },
+        "azureblob_connection": {
+            "type": "string",
+            "defaultValue": "azureblob"
+        },
+        "logic_app_rbac": {
+            "type": "string"
+        },
+        "domain_name": {
+            "type": "string"
+        }
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Logic/workflows",
+            "apiVersion": "2017-07-01",
+            "name": "[parameters('logic_app_name')]",
+            "location": "[resourceGroup().location]",
+            "identity": {
+                "type": "SystemAssigned"
+            },
+            "properties": {
+                "definition": {
+                    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "$connections": {
+                            "defaultValue": {},
+                            "type": "Object"
+                        },
+                        "domain_name": {
+                            "defaultValue": "[parameters('domain_name')]",
+                            "type": "String"
+                        }
+                    },
+                    "triggers": {
+                        "When_a_CSV_file_is_added_or_modified": {
+                            "recurrence": {
+                                "frequency": "Minute",
+                                "interval": 5
+                            },
+                            "evaluatedRecurrence": {
+                                "frequency": "Minute",
+                                "interval": 5
+                            },
+                            "splitOn": "@triggerBody()",
+                            "metadata": {
+                                "JTJmcGVuZGluZw==": "[concat('/', parameters('pending_container_name'))]"
+                            },
+                            "type": "ApiConnection",
+                            "inputs": {
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['azureblob']['connectionId']"
+                                    }
+                                },
+                                "method": "get",
+                                "path": "[concat('/v2/datasets/', parameters('csv_files_storage_account_name'), '/triggers/batch/onupdatedfile')]",
+                                "queries": {
+                                    "checkBothCreatedAndModifiedDateTime": false,
+                                    "folderId": "JTJmcGVuZGluZw==",
+                                    "maxFileCount": 1
+                                }
+                            }
+                        }
+                    },
+                    "actions": {
+                        "Close_HTML_tags": {
+                            "runAfter": {
+                                "Delete_CSV_file_from_pending_container": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "AppendToStringVariable",
+                            "inputs": {
+                                "name": "htmlTable",
+                                "value": "<tbody></table>"
+                            }
+                        },
+                        "Convert_CSV_to_JSON": {
+                            "runAfter": {
+                                "Get_CSV_content": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "Http",
+                            "inputs": {
+                                "body": "@body('Get_CSV_content')",
+                                "method": "POST",
+                                "uri": "[concat('https://', reference(resourceId('Microsoft.Web/sites', parameters('function_app_name')), '2023-01-01').defaultHostName, '/api', '/csv_to_json')]",
+                                "queries": {
+                                    "code": "[listKeys(resourceId('Microsoft.Web/sites/functions', parameters('function_app_name'), 'csv_to_json'),'2023-01-01').default]"
+                                }
+                            }
+                        },
+                        "Copy_CSV_file_to_completed_container": {
+                            "runAfter": {
+                                "For_each": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "ApiConnection",
+                            "inputs": {
+                                "headers": {
+                                    "ReadFileMetadataFromServer": true
+                                },
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['azureblob']['connectionId']"
+                                    }
+                                },
+                                "method": "post",
+                                "path": "[concat('/v2/datasets/', parameters('csv_files_storage_account_name'), '/copyFile')]",
+                                "queries": {
+                                    "destination": "[parameters('completed_container_name')]",
+                                    "overwrite": false,
+                                    "queryParametersSingleEncoded": true,
+                                    "source": "@triggerBody()?['Path']"
+                                }
+                            }
+                        },
+                        "Delete_CSV_file_from_pending_container": {
+                            "runAfter": {
+                                "Copy_CSV_file_to_completed_container": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "ApiConnection",
+                            "inputs": {
+                                "headers": {
+                                    "SkipDeleteIfFileNotFoundOnServer": false
+                                },
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['azureblob']['connectionId']"
+                                    }
+                                },
+                                "method": "delete",
+                                "path": "[concat('/v2/datasets/', parameters('csv_files_storage_account_name'), '/files/@{encodeURIComponent(encodeURIComponent(triggerBody()[''Path'']))}')]"
+                            }
+                        },
+                        "Email_HR": {
+                            "runAfter": {
+                                "Close_HTML_tags": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "ApiConnection",
+                            "inputs": {
+                                "body": {
+                                    "Body": "<p>The requested accounts have been created at @{formatDateTime(utcNow(), 'MM-dd-yyyy HH:mm')}:<br>\n@{variables('htmlTable')}</p>",
+                                    "Importance": "High",
+                                    "Subject": "Employee Account Creation Request Completed",
+                                    "To": "brcollet10@gmail.com"
+                                },
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['office365']['connectionId']"
+                                    }
+                                },
+                                "method": "post",
+                                "path": "/v2/Mail"
+                            }
+                        },
+                        "For_each": {
+                            "foreach": "@body('Parse_JSON')",
+                            "actions": {
+                                "Append_to_htmlTable": {
+                                    "runAfter": {
+                                        "Create_new_employee": [
+                                            "Succeeded"
+                                        ]
+                                    },
+                                    "type": "AppendToStringVariable",
+                                    "inputs": {
+                                        "name": "htmlTable",
+                                        "value": "<tr><td @{variables('styles').cellStyle}>@{variables('employeeDetails')['EMPLOYEE_ID']}</td><td @{variables('styles').cellStyle}>@{variables('employeeDetails')['FIRST_NAME']}</td><td @{variables('styles').cellStyle}>@{variables('employeeDetails')['LAST_NAME']}</td><td @{variables('styles').cellStyle}>@{variables('employeeDetails')['USERNAME']}</td><td @{variables('styles').cellStyle}>@{variables('employeeDetails')['EMAIL']}</td><td @{variables('styles').cellStyle}>@{variables('employeeDetails')['PHONE_NUMBER']}</td><td @{variables('styles').cellStyle}>@{variables('employeeDetails')['HIRE_DATE']}</td><td @{variables('styles').cellStyle}>@{variables('employeeDetails')['JOB_TITLE']}</td><td @{variables('styles').cellStyle}>@{variables('employeeDetails')['DEPARTMENT']}</td><td @{variables('styles').cellStyle}>@{variables('employeeDetails')['MANAGER_UPN']}</td></tr>\n"
+                                    }
+                                },
+                                "Check_if_manager_field_is_populated": {
+                                    "actions": {
+                                        "Assign_manager": {
+                                            "runAfter": {
+                                                "Get_manager": [
+                                                    "Succeeded"
+                                                ]
+                                            },
+                                            "type": "ApiConnection",
+                                            "inputs": {
+                                                "body": {
+                                                    "@@odata.id": "@body('Get_manager')['id']"
+                                                },
+                                                "host": {
+                                                    "connection": {
+                                                        "name": "@parameters('$connections')['azuread']['connectionId']"
+                                                    }
+                                                },
+                                                "method": "put",
+                                                "path": "/v1.0/users/@{encodeURIComponent(body('Create_new_employee')['id'])}/manager/$ref"
+                                            }
+                                        },
+                                        "Email_manager": {
+                                            "runAfter": {
+                                                "Assign_manager": [
+                                                    "Succeeded"
+                                                ]
+                                            },
+                                            "type": "ApiConnection",
+                                            "inputs": {
+                                                "body": {
+                                                    "Body": "<p>Dear @{body('Get_manager')['givenName']},<br>\n<br>\nThe account for your new team member, <strong></strong><strong>@{body('Create_new_employee')['displayName']}</strong><strong></strong>, has been successfully created. Below are the details for their account:<br>\n<br>\n<strong>Employee Name: </strong>@{body('Create_new_employee')['displayName']}<br>\n<strong>Email:</strong> @{body('Create_new_employee')['userPrincipalName']}<br>\n<strong>Temporary Password:</strong> @{body('Parse_JSON_2')['value']}<br>\n<br>\nPlease ensure that they receive this information promptly and guide them through the initial login process. The temporary password provided will prompt them to set up a secure password upon their first login.<br>\n<br>\nIf you have any questions or need further assistance, feel free to reach out.<br>\n<br>\nThank you for your cooperation.<br>\n<br>\nBest regards,<br>\nYour IT department</p>",
+                                                    "Importance": "Normal",
+                                                    "Subject": "New Employee Account Information for @{body('Create_new_employee')['displayName']}",
+                                                    "To": "brcollet10@gmail.com,@{variables('employeeDetails')['MANAGER_UPN']}"
+                                                },
+                                                "host": {
+                                                    "connection": {
+                                                        "name": "@parameters('$connections')['office365']['connectionId']"
+                                                    }
+                                                },
+                                                "method": "post",
+                                                "path": "/v2/Mail"
+                                            }
+                                        },
+                                        "Get_manager": {
+                                            "runAfter": {},
+                                            "type": "ApiConnection",
+                                            "inputs": {
+                                                "host": {
+                                                    "connection": {
+                                                        "name": "@parameters('$connections')['azuread']['connectionId']"
+                                                    }
+                                                },
+                                                "method": "get",
+                                                "path": "/v1.0/users/@{encodeURIComponent(items('For_each')['MANAGER_UPN'])}"
+                                            }
+                                        }
+                                    },
+                                    "runAfter": {
+                                        "Append_to_htmlTable": [
+                                            "Succeeded"
+                                        ]
+                                    },
+                                    "expression": {
+                                        "and": [
+                                            {
+                                                "greater": [
+                                                    "@length(items('For_each')['MANAGER_UPN'])",
+                                                    0
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    "type": "If"
+                                },
+                                "Create_new_employee": {
+                                    "runAfter": {
+                                        "Parse_JSON_2": [
+                                            "Succeeded"
+                                        ]
+                                    },
+                                    "type": "ApiConnection",
+                                    "inputs": {
+                                        "body": {
+                                            "accountEnabled": true,
+                                            "department": "@{variables('employeeDetails')['DEPARTMENT']}",
+                                            "displayName": "@{concat(variables('employeeDetails')['FIRST_NAME'],' ', variables('employeeDetails')['LAST_NAME'])}",
+                                            "givenName": "@{variables('employeeDetails')['FIRST_NAME']}",
+                                            "jobTitle": "@{variables('employeeDetails')['JOB_TITLE']}",
+                                            "mailNickname": "@{variables('employeeDetails')['USERNAME']}",
+                                            "mobilePhone": "@{variables('employeeDetails')['PHONE_NUMBER']}",
+                                            "passwordProfile": {
+                                                "password": "@body('Parse_JSON_2')['value']"
+                                            },
+                                            "surname": "@{variables('employeeDetails')['LAST_NAME']}",
+                                            "userPrincipalName": "@{variables('employeeDetails')['EMAIL']}"
+                                        },
+                                        "host": {
+                                            "connection": {
+                                                "name": "@parameters('$connections')['azuread']['connectionId']"
+                                            }
+                                        },
+                                        "method": "post",
+                                        "path": "/v1.0/users"
+                                    }
+                                },
+                                "Fetch_secure_password": {
+                                    "runAfter": {
+                                        "Set_variable": [
+                                            "Succeeded"
+                                        ]
+                                    },
+                                    "type": "Http",
+                                    "inputs": {
+                                        "body": {
+                                            "length": 50
+                                        },
+                                        "method": "POST",
+                                        "uri": "[concat('https://', reference(resourceId('Microsoft.Web/sites', parameters('function_app_name')), '2023-01-01').defaultHostName, '/api', '/password_generator')]",
+                                        "queries": {
+                                            "code": "[listKeys(resourceId('Microsoft.Web/sites/functions', parameters('function_app_name'), 'password_generator'),'2023-01-01').default]"
+                                        }
+                                    },
+                                    "runtimeConfiguration": {
+                                        "secureData": {
+                                            "properties": [
+                                                "outputs"
+                                            ]
+                                        }
+                                    }
+                                },
+                                "Parse_JSON_2": {
+                                    "runAfter": {
+                                        "Fetch_secure_password": [
+                                            "Succeeded"
+                                        ]
+                                    },
+                                    "type": "ParseJson",
+                                    "inputs": {
+                                        "content": "@body('Fetch_secure_password')",
+                                        "schema": {
+                                            "properties": {
+                                                "value": {
+                                                    "type": "string"
+                                                }
+                                            },
+                                            "type": "object"
+                                        }
+                                    }
+                                },
+                                "Set_variable": {
+                                    "runAfter": {},
+                                    "type": "SetVariable",
+                                    "inputs": {
+                                        "name": "employeeDetails",
+                                        "value": {
+                                            "DEPARTMENT": "@{items('For_each')['DEPARTMENT']}",
+                                            "EMAIL": "@{concat(toLower(substring(items('For_each')['FIRST_NAME'],0,1)),toLower(items('For_each')['LAST_NAME']),'@',parameters('domain_name'))}",
+                                            "EMPLOYEE_ID": "@{items('For_each')['EMPLOYEE_ID']}",
+                                            "FIRST_NAME": "@{concat(toUpper(substring(items('For_each')['FIRST_NAME'],0,1)),substring(items('For_each')['FIRST_NAME'],1))}",
+                                            "HIRE_DATE": "@{items('For_each')['HIRE_DATE']}",
+                                            "JOB_TITLE": "@{items('For_each')['JOB_TITLE']}",
+                                            "LAST_NAME": "@{concat(toUpper(substring(items('For_each')['LAST_NAME'],0,1)),substring(items('For_each')['LAST_NAME'],1))}",
+                                            "MANAGER_UPN": "@{items('For_each')['MANAGER_UPN']}",
+                                            "PHONE_NUMBER": "@{items('For_each')['PHONE_NUMBER']}",
+                                            "USERNAME": "@{concat(toLower(substring(items('For_each')['FIRST_NAME'],0,1)),toLower(items('For_each')['LAST_NAME']))}"
+                                        }
+                                    }
+                                }
+                            },
+                            "runAfter": {
+                                "Parse_JSON": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "Foreach",
+                            "runtimeConfiguration": {
+                                "concurrency": {
+                                    "repetitions": 1
+                                }
+                            }
+                        },
+                        "Get_CSV_content": {
+                            "runAfter": {
+                                "Initialize_employeeDetails": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "ApiConnection",
+                            "inputs": {
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['azureblob']['connectionId']"
+                                    }
+                                },
+                                "method": "get",
+                                "path": "[concat('/v2/datasets/', parameters('csv_files_storage_account_name'), '/GetFileContentByPath')]",
+                                "queries": {
+                                    "inferContentType": true,
+                                    "path": "@triggerBody()?['Path']",
+                                    "queryParametersSingleEncoded": true
+                                }
+                            }
+                        },
+                        "Initialize_employeeDetails": {
+                            "runAfter": {
+                                "Initialize_htmlTable": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "employeeDetails",
+                                        "type": "object",
+                                        "value": {
+                                            "DEPARTMENT": "",
+                                            "EMAIL": "",
+                                            "EMPLOYEE_ID": "",
+                                            "FIRST_NAME": "",
+                                            "HIRE_DATE": "",
+                                            "JOB_TITLE": "",
+                                            "LAST_NAME": "",
+                                            "MANAGER_UPN": "",
+                                            "PHONE_NUMBER": "",
+                                            "USERNAME": ""
+                                        }
+                                    }
+                                ]
+                            }
+                        },
+                        "Initialize_htmlTable": {
+                            "runAfter": {
+                                "Initialize_styles": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "htmlTable",
+                                        "type": "string",
+                                        "value": "<table @{variables('styles').tableStyle}>\n  <thead>\n    <th @{variables('styles').headerStyle}>Employee ID</th>\n    <th @{variables('styles').headerStyle}>First Name</th>\n    <th @{variables('styles').headerStyle}>Last Name</th>\n    <th @{variables('styles').headerStyle}>Username</th>\n    <th @{variables('styles').headerStyle}>Email</th>\n    <th @{variables('styles').headerStyle}>Phone Number</th>\n    <th @{variables('styles').headerStyle}>Hire Date</th>\n    <th @{variables('styles').headerStyle}>Job Title</th>\n    <th @{variables('styles').headerStyle}>Department</th>\n    <th @{variables('styles').headerStyle}>Manager</th>\n  </thead>\n  <tbody>"
+                                    }
+                                ]
+                            }
+                        },
+                        "Initialize_styles": {
+                            "runAfter": {},
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "styles",
+                                        "type": "object",
+                                        "value": {
+                                            "cellStyle": "style=\"font-family: Calibri; padding: 5px; border: 1px solid black;\"",
+                                            "headerStyle": "style=\"font-family: Helvetica; padding: 5px; border: 1px solid black;\"",
+                                            "tableStyle": "style=\"border-collapse: collapse;\""
+                                        }
+                                    }
+                                ]
+                            }
+                        },
+                        "Parse_JSON": {
+                            "runAfter": {
+                                "Convert_CSV_to_JSON": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "ParseJson",
+                            "inputs": {
+                                "content": "@body('Convert_CSV_to_JSON')",
+                                "schema": {
+                                    "items": {
+                                        "properties": {
+                                            "DEPARTMENT": {
+                                                "type": "string"
+                                            },
+                                            "EMPLOYEE_ID": {
+                                                "type": "string"
+                                            },
+                                            "FIRST_NAME": {
+                                                "type": "string"
+                                            },
+                                            "HIRE_DATE": {
+                                                "type": "string"
+                                            },
+                                            "JOB_TITLE": {
+                                                "type": "string"
+                                            },
+                                            "LAST_NAME": {
+                                                "type": "string"
+                                            },
+                                            "MANAGER_UPN": {
+                                                "type": "string"
+                                            },
+                                            "PHONE_NUMBER": {
+                                                "type": "string"
+                                            }
+                                        },
+                                        "required": [
+                                            "EMPLOYEE_ID",
+                                            "FIRST_NAME",
+                                            "LAST_NAME",
+                                            "PHONE_NUMBER",
+                                            "HIRE_DATE",
+                                            "JOB_TITLE",
+                                            "DEPARTMENT",
+                                            "MANAGER_UPN"
+                                        ],
+                                        "type": "object"
+                                    },
+                                    "type": "array"
+                                }
+                            }
+                        }
+                    },
+                    "outputs": {}
+                },
+                "parameters": {
+                    "$connections": {
+                        "value": {
+                            "office365": {
+                                "connectionId": "[resourceId('Microsoft.Web/connections', parameters('office365_connection'))]",
+                                "connectionName": "[parameters('office365_connection')]",
+                                "id": "[concat('/subscriptions/',subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/office365')]"
+                            },
+                            "azuread": {
+                                "connectionId": "[resourceId('Microsoft.Web/connections', parameters('azuread_connection'))]",
+                                "connectionName": "[parameters('azuread_connection')]",
+                                "id": "[concat('/subscriptions/',subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuread')]"
+                            },
+                            "azureblob": {
+                                "connectionId": "[resourceId('Microsoft.Web/connections',parameters('azureblob_connection'))]",
+                                "connectionName": "[parameters('azureblob_connection')]",
+                                "connectionProperties": {
+                                    "authentication": {
+                                        "type": "ManagedServiceIdentity"
+                                    }
+                                },
+                                "id": "[concat('/subscriptions/',subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azureblob')]"
+                            }
+                        }
+                    }
+                }
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.Web/connections',parameters('office365_connection'))]",
+                "[resourceId('Microsoft.Web/connections',parameters('azuread_connection'))]",
+                "[resourceId('Microsoft.Web/connections',parameters('azureblob_connection'))]"
+            ]
+        },
+        {
+            "type": "Microsoft.Storage/storageAccounts",
+            "apiVersion": "2023-01-01",
+            "location": "[resourceGroup().location]",
+            "name": "[parameters('csv_files_storage_account_name')]",
+            "kind": "StorageV2",
+            "sku": {
+                "name": "Standard_LRS",
+                "tier": "Standard"
+            },
+            "properties": {
+                "supportsHttpsTrafficOnly": true
+            }
+        },
+        {
+            "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+            "apiVersion": "2023-01-01",
+            "name": "[concat(parameters('csv_files_storage_account_name'), '/default/', parameters('pending_container_name'))]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('csv_files_storage_account_name'))]"
+            ],
+            "properties": {
+                "immutableStorageWithVersioning": {
+                    "enabled": false
+                },
+                "defaultEncryptionScope": "$account-encryption-key",
+                "denyEncryptionScopeOverride": false,
+                "publicAccess": "None"
+            }
+        },
+        {
+            "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+            "apiVersion": "2023-01-01",
+            "name": "[concat(parameters('csv_files_storage_account_name'), '/default/', parameters('completed_container_name'))]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('csv_files_storage_account_name'))]"
+            ],
+            "properties": {
+                "immutableStorageWithVersioning": {
+                    "enabled": false
+                },
+                "defaultEncryptionScope": "$account-encryption-key",
+                "denyEncryptionScopeOverride": false,
+                "publicAccess": "None"
+            }
+        },
+        {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "location": "[resourceGroup().location]",
+            "name": "[parameters('office365_connection')]",
+            "properties": {
+                "api": {
+                    "id": "[concat('subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location,'/managedApis/office365')]"
+                },
+                "displayName": "[parameters('office365_connection')]",
+                "parameterValues": {}
+            },
+            "kind": "V1"
+        },
+        {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "location": "[resourceGroup().location]",
+            "name": "[parameters('azuread_connection')]",
+            "properties": {
+                "api": {
+                    "id": "[concat('subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location,'/managedApis/azuread')]"
+                },
+                "displayName": "[parameters('azuread_connection')]",
+                "parameterValues": {}
+            },
+            "kind": "V1"
+        },
+        {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "location": "[resourceGroup().location]",
+            "name": "[parameters('azureblob_connection')]",
+            "properties": {
+                "api": {
+                    "id": "[concat('subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location,'/managedApis/azureblob')]"
+                },
+                "displayName": "[parameters('azureblob_connection')]",
+                "parameterValueSet": {
+                    "name": "managedIdentityAuth",
+                    "values": {}
+                }
+            },
+            "kind": "V1"
+        },
+        {
+            "type": "Microsoft.Authorization/roleAssignments",
+            "apiVersion": "2022-04-01",
+            "name": "[guid(resourceGroup().id)]",
+            "properties": {
+                "roleDefinitionId": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Authorization/roleDefinitions/', parameters('logic_app_rbac'))]",
+                "principalId": "[reference(resourceId('Microsoft.Logic/workflows', parameters('logic_app_name')), '2019-05-01', 'Full').identity.principalId]",
+                "principalType": "ServicePrincipal"
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.Logic/workflows', parameters('logic_app_name'))]"
+            ]
+        }
+    ]
+}

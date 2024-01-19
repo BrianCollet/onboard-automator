@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "function_app_name": {
+      "value": "{UPDATE-ME}"
+    },
+    "logic_app_name": {
+      "value": "{UPDATE-ME}"
+    },
+    "csv_files_storage_account_name": {
+      "value": "{UPDATE-ME}"
+    },
+    "pending_container_name": {
+      "value": "pending"
+    },
+    "completed_container_name": {
+      "value": "completed"
+    },
+    "office365_connection": {
+      "value": "office365"
+    },
+    "azuread_connection": {
+      "value": "azuread"
+    },
+    "azureblob_connection": {
+      "value": "azureblob"
+    },
+    "logic_app_rbac": {
+      "value": "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+    },
+    "domain_name": {
+      "value": "{UPDATE-ME}"
+    }
+  }
+}
